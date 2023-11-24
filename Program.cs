@@ -4,8 +4,8 @@ using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 
-var clientId = "AKIAU4CPZ6AUW2VZZ3GD";
-var clientSecret = "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";
+var clientId = "";
+var clientSecret = "";
 var region = "eu-west-1";
 
 var host = "beh3fmm797.execute-api.eu-west-1.amazonaws.com";
