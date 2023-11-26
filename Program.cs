@@ -1,45 +1,76 @@
 ﻿using ConsoleApp5;
+using ManuallySigningAWSRequest;
 using System.Globalization;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using System.Web;
 
 var clientId = "";
 var clientSecret = "";
 var region = "eu-west-1";
 
 var host = "beh3fmm797.execute-api.eu-west-1.amazonaws.com";
-var queryString = "a=value&b=value";
+//var queryString = "a=value&b=value";
 var path = "test/test";
 var method = HttpMethod.Post;
 var contentType = "application/json";
-var payload = @"{""value"" : ""value""}";
+var payload = @"{""key"" : ""value""}";
+bool useSignedUrl = true;
 
-var url = $"https://{host}/{path}?{queryString}";
 var service = "execute-api";
-
-var hashier = SHA256.Create();
 var signingTime = DateTime.UtcNow;
-var payloadBytes = Encoding.UTF8.GetBytes(payload);
-var hash = ToHex(hashier.ComputeHash(payloadBytes));
+
+
+var dateFormeted = signingTime.FormatDateTime("yyyyMMdd");
+var dateTimeFormeted = signingTime.FormatDateTime("yyyyMMddTHHmmssZ");
+
+string сredentialScope = string.Format(CultureInfo.InvariantCulture, "{0}/{1}/{2}/{3}",
+        dateFormeted,
+        region, 
+        service,
+        "aws4_request");
 
 Dictionary<string, string> headers = new Dictionary<string, string>
 {
     { "Host", host},
-    { "X-Amz-Date", signingTime.ToUniversalTime().ToString("yyyyMMddTHHmmssZ", CultureInfo.InvariantCulture)},
 };
 
-var sortedHeaders = headers.OrderBy(a => a.Key).ToDictionary(a => a.Key.ToLower(), b => b.Value);
+if (!useSignedUrl)
+{
+    headers.Add("X-Amz-Date", dateTimeFormeted);
+} 
 
+var sortedHeaders = headers.OrderBy(a => a.Key.ToLower()).ToDictionary(a => a.Key.ToLower(), b => b.Value);
+
+var queryStringObj = useSignedUrl ? new Dictionary<string, string>
+{
+    ["X-Amz-Algorithm"] = Constants.AWS4HMACSHA256,
+    ["X-Amz-Credential"] = $"{clientId}/{сredentialScope}",
+    ["X-Amz-Date"] = dateTimeFormeted,
+    ["X-Amz-SignedHeaders"] = string.Join(';', sortedHeaders.Select(a => a.Key))
+} : new Dictionary<string, string>();
+
+var valuse = string.Join("&", queryStringObj.OrderBy(a => a.Key).Select(a => $"{a.Key}={HttpUtility.UrlEncode(a.Value)}"))
+        .Replace("%2f", "%2F");
+
+var url = $"https://{host}/{path}?{valuse}";
+
+var payloadHash = payload.ToSha256().ToHex();
 var canonicalRequest = $"{method}" + "\n" +
     $"/{path}" + "\n" +
-    $"{queryString}" + "\n" +
+    $"{valuse}" + "\n" +
     $"{string.Join('\n', sortedHeaders.Select(a => $"{a.Key}:{a.Value}"))}" + "\n" +
     "\n" +
     $"{string.Join(';', sortedHeaders.Select(a => a.Key))}" + "\n" +
-    $"{hash}";
+    $"{payloadHash}";
 
-var signature = ComputeSignature(clientId,
+Console.WriteLine(canonicalRequest);
+
+var signature = ComputeSignature(
+    сredentialScope,
+    dateFormeted,
+    dateTimeFormeted,
     clientSecret,
     region,
     signingTime,
@@ -48,14 +79,16 @@ var signature = ComputeSignature(clientId,
     );
 
 var authHeader = new StringBuilder().Append(Constants.AWS4HMACSHA256)
-    .Append($" Credential={clientId}/{signature.Item2}")
+    .Append($" Credential={clientId}/{сredentialScope}")
     .Append($" SignedHeaders={string.Join(';', sortedHeaders.Select(a => a.Key))}")
-    .Append($" Signature={signature.Item1}")
+    .Append($" Signature={signature}")
     .ToString();
 
 var client = HttpClientFactory.Create();
 
-using (var request = new HttpRequestMessage(method, url))
+
+
+using (var request = new HttpRequestMessage(method, url + (useSignedUrl ? $"&X-Amz-Signature={signature}":"")))
 {
     request.Content = new ByteArrayContent(Encoding.UTF8.GetBytes(payload));
     request.Content!.Headers.ContentType = MediaTypeHeaderValue.Parse(contentType);
@@ -64,61 +97,55 @@ using (var request = new HttpRequestMessage(method, url))
     {
         request.Headers.TryAddWithoutValidation(h.Key, h.Value);
     }
-    request.Headers.TryAddWithoutValidation(Constants.Authorization, authHeader);
+    if (!useSignedUrl)
+    {
+        request.Headers.TryAddWithoutValidation(Constants.Authorization, authHeader);
+    }
 
     var response = HttpClientFactory.Create().SendAsync(request).Result;
     Console.WriteLine("Status code " + response.StatusCode);
     Console.WriteLine(response.Content.ReadAsStringAsync().Result);
 }
-static string ToHex(byte[] data)
+
+static string ComputeSignature(string credentialsString, 
+    string dateFormatted, 
+    string dateTimeFormatted, 
+    string awsSecretAccessKey, 
+    string region, 
+    DateTime signedAt, 
+    string service, 
+    string canonicalRequest)
 {
-    StringBuilder stringBuilder = new StringBuilder();
-    for (int i = 0; i < data.Length; i++)
+    var composeSigningKey = (string awsSecretAccessKey, 
+        string region, 
+        string date, 
+        string service) =>
     {
-        stringBuilder.Append(data[i].ToString("x2", CultureInfo.InvariantCulture));
-    }
+        byte[] dateKey = date.HMACSign("AWS4" + awsSecretAccessKey);
+        byte[] dateRegionKeu = region.HMACSign(dateKey);
+        byte[] dateRegionServiceKey = service.HMACSign(dateRegionKeu);
+       
+        return "aws4_request".HMACSign(dateRegionServiceKey);
+    };
 
-    return stringBuilder.ToString();
-}
-
-static string FormatDateTime(DateTime dt, string formatString)
-{
-    return dt.ToUniversalTime().ToString(formatString, CultureInfo.InvariantCulture);
-}
-
-static byte[] ComposeSigningKey(string awsSecretAccessKey, string region, string date, string service)
-{
-    char[] array = ("AWS4" + awsSecretAccessKey).ToCharArray();
-    byte[] key = HMACSignBinary(Encoding.UTF8.GetBytes(array), Encoding.UTF8.GetBytes(date));
-    byte[] key2 = HMACSignBinary(key, Encoding.UTF8.GetBytes(region));
-    byte[] key3 = HMACSignBinary(key2, Encoding.UTF8.GetBytes(service));
-    return HMACSignBinary(key3, Encoding.UTF8.GetBytes("aws4_request"));
-}
-
-static byte[] HMACSignBinary(byte[] key, byte[] data)
-{
-    using (KeyedHashAlgorithm keyedHashAlgorithm = new HMACSHA256())
-    {
-        keyedHashAlgorithm.Key = key;
-        var result = keyedHashAlgorithm.ComputeHash(data);
-        return result;
-    } 
-}
-
-static Tuple<string, string> ComputeSignature(string awsAccessKey, string awsSecretAccessKey, string region, DateTime signedAt, string service, string canonicalRequest)
-{
-    string text = FormatDateTime(signedAt, "yyyyMMdd");
-    string text2 = string.Format(CultureInfo.InvariantCulture, "{0}/{1}/{2}/{3}", text, region, service, "aws4_request");
-    StringBuilder stringBuilder = new StringBuilder();
-    stringBuilder.AppendFormat(CultureInfo.InvariantCulture, "{0}-{1}\n{2}\n{3}\n", "AWS4", "HMAC-SHA256", FormatDateTime(signedAt, "yyyyMMddTHHmmssZ"), text2);
     var hashier = SHA256.Create();
-    byte[] data = hashier.ComputeHash(Encoding.UTF8.GetBytes(canonicalRequest));
-    stringBuilder.Append(ToHex(data));
-    byte[] array = ComposeSigningKey(awsSecretAccessKey, region, text, service);
-    string data2 = stringBuilder.ToString();
-    byte[] signature = HMACSignBinary(array, Encoding.UTF8.GetBytes(data2));
+    var canonicalRequestHash = hashier.ComputeHash(Encoding.UTF8.GetBytes(canonicalRequest)).ToHex();
 
-    return new Tuple<string, string>(ToHex(signature), text2);
+    string canonitcalRequestExtended =
+        new StringBuilder()
+            .Append("AWS4-HMAC-SHA256")
+            .Append("\n")
+            .Append(dateTimeFormatted)
+            .Append("\n")
+            .Append(credentialsString)
+            .Append("\n")
+            .Append(canonicalRequestHash).ToString();
+
+    byte[] signingKey = composeSigningKey(awsSecretAccessKey, 
+        region, 
+        dateFormatted, 
+        service);
+    byte[] signature = canonitcalRequestExtended.HMACSign(signingKey);
+
+    return signature.ToHex();
 }
-
-
